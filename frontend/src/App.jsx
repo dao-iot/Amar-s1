@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import axios from 'axios'
 import Dashboard from './components/Dashboard'
 import Login from './components/Login'
@@ -19,15 +19,23 @@ function App() {
     return token ? { token, role: user.role } : null;
   });
 
-  const handleLogin = (token, role) => {
-    setAuth({ token, role });
-  };
+  // Use a ref to track logout function to avoid stale closure in interceptor
+  const logoutRef = useRef();
 
-  const handleLogout = () => {
+  const handleLogin = useCallback((token, role) => {
+    setAuth({ token, role });
+  }, []);
+
+  const handleLogout = useCallback(() => {
     localStorage.removeItem('ev_token');
     localStorage.removeItem('ev_user');
     setAuth(null);
-  };
+  }, []);
+
+  // Keep the logout ref up to date
+  useEffect(() => {
+    logoutRef.current = handleLogout;
+  }, [handleLogout]);
 
   // Global error handler for 401 Unauthorized
   useEffect(() => {
@@ -35,7 +43,7 @@ function App() {
       response => response,
       error => {
         if (error.response?.status === 401) {
-          handleLogout();
+          logoutRef.current?.();
         }
         return Promise.reject(error);
       }

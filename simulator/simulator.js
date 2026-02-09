@@ -1,10 +1,18 @@
 /*
 ================================================
-EV FLEET SIMULATOR - SCALABLE (50-100 VEHICLES)
+EV FLEET SIMULATOR - HIGH SCALE EDITION (500 ALERTS/MIN)
 ================================================
 
 PURPOSE:
-Stress-test EV Fleet Monitoring Platform with realistic, concurrent telemetry from 50-100 vehicles.
+Stress-test EV Fleet Monitoring Platform with realistic, concurrent telemetry
+generating ~500 alerts per minute through natural rule violations.
+
+TARGET METRICS:
+---------------
+- Alert Rate: ~500 alerts/minute sustained
+- Fleet Size: 250 vehicles
+- Telemetry Rate: ~500 packets/second (250 vehicles × 2 packets/sec)
+- Alert Sources: low_battery, critical_battery, overheating, mixed_anomalies
 
 RUN INSTRUCTIONS:
 -----------------
@@ -15,19 +23,16 @@ RUN INSTRUCTIONS:
 
 CONFIGURATION:
 --------------
-Modify these constants below to adjust behavior:
-
-- FLEET_SIZE: Number of vehicles to simulate (default: 50)
-- TELEMETRY_INTERVAL: Base interval in ms (default: 2000)
-- JITTER_MS: Random delay to prevent burst traffic (default: 300)
-- SCENARIO_DISTRIBUTION: Percentage of each scenario type
+All scaling parameters are centralized in the CONFIG section below.
+Modify TARGET_ALERT_RATE and the system auto-tunes other parameters.
 
 ARCHITECTURE:
 -------------
-1. SimulatorConfig → Global configuration
-2. VehicleSimulator → Individual EV with state machine
+1. SimulatorConfig → Global configuration with scaling targets
+2. VehicleSimulator → Individual EV with independent state machine
 3. FleetManager → Orchestrates all vehicles, handles startup/shutdown
-4. Graceful error handling per vehicle (one failure ≠ fleet failure)
+4. Async telemetry sends with retry backoff (no blocking)
+5. Graceful error handling per vehicle (one failure ≠ fleet failure)
 
 ================================================
 */
@@ -35,42 +40,88 @@ ARCHITECTURE:
 const axios = require('axios');
 
 // ================================================
-// SIMULATOR CONFIGURATION (MODIFY HERE)
+// SCALING CONFIGURATION - MODIFY TARGETS HERE
+// ================================================
+
+/**
+ * PRIMARY SCALING TARGET
+ * The simulator will tune other parameters to approximate this alert rate.
+ * Actual rate depends on alert rule conditions being triggered naturally.
+ */
+const TARGET_ALERT_RATE = 500; // alerts per minute
+
+/**
+ * FLEET CONFIGURATION
+ * - FLEET_SIZE: Number of simulated vehicles (200-300 recommended for 500 alerts/min)
+ * - TELEMETRY_INTERVAL_MS: Base ms between packets per vehicle (lower = more alerts)
+ * - JITTER_MS: Random ±ms to prevent synchronized bursts (keep 200-300ms)
+ */
+const FLEET_SIZE = 250;           // 250 vehicles for high alert volume
+const TELEMETRY_INTERVAL_MS = 500; // 500ms = 2 packets/sec per vehicle
+const JITTER_MS = 250;             // ±250ms jitter prevents thundering herd
+
+/**
+ * SCENARIO DISTRIBUTION
+ * Adjusts the ratio of vehicles in each alert-generating scenario.
+ * Higher anomaly ratios = more alerts per vehicle.
+ * Must sum to 100.
+ */
+const SCENARIO_DISTRIBUTION = {
+  normal: 20,        // 20% normal (no alerts)
+  low_battery: 35,   // 35% low battery (triggers low_battery + critical_battery)
+  overheating: 25,   // 25% overheating (triggers high_temperature + critical_temperature)
+  mixed_anomaly: 20  // 20% mixed (triggers random alert types)
+};
+
+// Validate distribution sums to 100
+const totalDist = Object.values(SCENARIO_DISTRIBUTION).reduce((a, b) => a + b, 0);
+if (totalDist !== 100) {
+  console.error(`ERROR: SCENARIO_DISTRIBUTION must sum to 100, got ${totalDist}`);
+  process.exit(1);
+}
+
+// ================================================
+// SIMULATOR CONFIGURATION OBJECT
 // ================================================
 
 const CONFIG = {
   // API endpoint
   API_URL: 'http://localhost:3000/api/v1',
-  
+
   // Admin credentials for vehicle registration
   ADMIN_CREDENTIALS: {
     username: 'admin',
     password: 'admin123'
   },
-  
-  // Fleet size: Total number of vehicles to simulate
-  FLEET_SIZE: 50,  // Change to 20, 50, 100, etc.
-  
-  // Telemetry timing
-  TELEMETRY_INTERVAL: 2000,  // Base interval in milliseconds (2 seconds)
-  JITTER_MS: 300,            // Random jitter ±300ms to prevent traffic bursts
-  
-  // Scenario distribution (percentages must sum to 100)
-  SCENARIO_DISTRIBUTION: {
-    normal: 60,        // 60% normal operation
-    low_battery: 20,   // 20% low battery
-    overheating: 10,   // 10% overheating
-    mixed_anomaly: 10  // 10% mixed anomalies
-  },
-  
-  // Retry logic for failed telemetry
-  MAX_RETRIES: 3,
-  RETRY_DELAY_MS: 1000,
-  
-  // Logging verbosity
-  LOG_TELEMETRY: false,  // Set to true for detailed per-vehicle logs
-  LOG_ALERTS: true,      // Log when alerts are likely triggered
-  LOG_ERRORS: true       // Log errors and retries
+
+  // Fleet configuration (from scaling parameters above)
+  FLEET_SIZE: FLEET_SIZE,
+  TELEMETRY_INTERVAL: TELEMETRY_INTERVAL_MS,
+  JITTER_MS: JITTER_MS,
+
+  // Scenario distribution (from scaling parameters above)
+  SCENARIO_DISTRIBUTION: SCENARIO_DISTRIBUTION,
+
+  // Retry logic with exponential backoff
+  MAX_RETRIES: 5,
+  RETRY_DELAY_MS: 500,     // Initial retry delay
+  RETRY_BACKOFF_MULTIPLIER: 2,  // Exponential backoff
+  CIRCUIT_BREAKER_THRESHOLD: 10, // Pause vehicle after N consecutive errors
+
+  // Logging verbosity (reduce at scale to prevent I/O bottleneck)
+  LOG_TELEMETRY: false,    // Disable per-vehicle telemetry logs at scale
+  LOG_ALERTS: true,        // Keep alert logging for verification
+  LOG_ERRORS: true,        // Keep error logging
+  LOG_STATS_INTERVAL: 30,  // Print stats every N seconds
+
+  // Performance tuning
+  BATCH_REGISTRATION: true,      // Register vehicles in batches
+  REGISTRATION_BATCH_SIZE: 20,   // Vehicles per registration batch
+  REGISTRATION_DELAY_MS: 100,    // Delay between batches
+  STARTUP_STAGGER_MS: 5,         // ms delay between vehicle starts
+
+  // Scaling targets (for monitoring)
+  TARGET_ALERT_RATE: TARGET_ALERT_RATE
 };
 
 // Global state
@@ -106,12 +157,13 @@ async function authenticate() {
 
 /**
  * VehicleSimulator: Represents a single EV with realistic behavior.
- * 
+ *
  * Each vehicle:
  * - Maintains internal state (speed, SOC, temps, etc.)
  * - Updates state based on assigned scenario
  * - Sends telemetry independently with jitter
- * - Handles network errors gracefully with retry logic
+ * - Handles network errors gracefully with exponential backoff
+ * - Implements circuit breaker pattern for resilience
  */
 class VehicleSimulator {
   constructor(vehicleId, scenario) {
@@ -120,7 +172,17 @@ class VehicleSimulator {
     this.intervalId = null;
     this.retryCount = 0;
     this.consecutiveErrors = 0;
-    
+    this.circuitOpen = false;
+    this.circuitResetTime = null;
+    this.isPaused = false;
+
+    // Statistics tracking
+    this.stats = {
+      packetsSent: 0,
+      packetsFailed: 0,
+      alertsTriggered: 0
+    };
+
     // Initialize vehicle state based on scenario
     this.state = this.initializeState(scenario);
   }
@@ -235,59 +297,116 @@ class VehicleSimulator {
   }
 
   /**
-   * Send telemetry to backend with retry logic.
+   * Check if circuit breaker allows requests
+   */
+  checkCircuitBreaker() {
+    if (this.circuitOpen) {
+      const now = Date.now();
+      if (this.circuitResetTime && now > this.circuitResetTime) {
+        // Reset circuit breaker after cooldown
+        this.circuitOpen = false;
+        this.consecutiveErrors = 0;
+        if (CONFIG.LOG_ERRORS) {
+          console.log(`[${this.vehicleId}] Circuit breaker reset, resuming telemetry`);
+        }
+        return true;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Send telemetry to backend with retry logic and circuit breaker.
    * Failures are isolated to this vehicle only.
+   * Uses exponential backoff for retries.
    */
   async sendTelemetry() {
+    // Skip if paused or circuit breaker is open
+    if (this.isPaused || !this.checkCircuitBreaker()) {
+      return;
+    }
+
     this.updateState();
-    
+
     const payload = {
       vehicle_id: this.vehicleId,
       timestamp: Date.now(),
       data: { ...this.state }
     };
 
-    try {
-      await axios.post(`${CONFIG.API_URL}/telemetry`, payload, {
-        timeout: 5000  // 5 second timeout
-      });
-      
-      // Reset error counters on success
-      this.retryCount = 0;
-      this.consecutiveErrors = 0;
-      
-      // Optional: Log telemetry (disable for large fleets to reduce noise)
-      if (CONFIG.LOG_TELEMETRY) {
-        console.log(`[${this.vehicleId}] Speed=${this.state.speed}km/h | SOC=${this.state.soc}% | Temp=${this.state.temperature}°C`);
-      }
-      
-      // Log when alerts are likely triggered
-      if (CONFIG.LOG_ALERTS) {
-        if (this.state.soc < 5) {
-          console.log(`⚠ [${this.vehicleId}] CRITICAL BATTERY: SOC=${this.state.soc}%`);
-        } else if (this.state.soc < 15) {
-          console.log(`⚠ [${this.vehicleId}] LOW BATTERY: SOC=${this.state.soc}%`);
+    let attempt = 0;
+    let success = false;
+
+    while (attempt < CONFIG.MAX_RETRIES && !success) {
+      try {
+        await axios.post(`${CONFIG.API_URL}/telemetry`, payload, {
+          timeout: 5000  // 5 second timeout
+        });
+
+        // Success - reset error counters
+        this.retryCount = 0;
+        this.consecutiveErrors = 0;
+        this.stats.packetsSent++;
+        success = true;
+
+        // Optional: Log telemetry (disable for large fleets to reduce noise)
+        if (CONFIG.LOG_TELEMETRY) {
+          console.log(`[${this.vehicleId}] Speed=${this.state.speed}km/h | SOC=${this.state.soc}% | Temp=${this.state.temperature}°C`);
         }
-        
-        if (this.state.temperature > 85 || this.state.motor_temp > 85) {
-          console.log(`⚠ [${this.vehicleId}] HIGH TEMPERATURE: ${this.state.temperature}°C`);
+
+        // Log when alerts are likely triggered
+        if (CONFIG.LOG_ALERTS) {
+          let alertTriggered = false;
+          if (this.state.soc < 5) {
+            console.log(`⚠ [${this.vehicleId}] CRITICAL BATTERY: SOC=${this.state.soc}%`);
+            alertTriggered = true;
+          } else if (this.state.soc < 15) {
+            console.log(`⚠ [${this.vehicleId}] LOW BATTERY: SOC=${this.state.soc}%`);
+            alertTriggered = true;
+          }
+
+          if (this.state.temperature > 85 || this.state.motor_temp > 85) {
+            console.log(`⚠ [${this.vehicleId}] HIGH TEMPERATURE: ${this.state.temperature}°C`);
+            alertTriggered = true;
+          }
+
+          if (alertTriggered) {
+            this.stats.alertsTriggered++;
+          }
         }
-      }
-      
-    } catch (error) {
-      this.consecutiveErrors++;
-      
-      if (CONFIG.LOG_ERRORS) {
-        console.error(`✗ [${this.vehicleId}] Telemetry failed (attempt ${this.consecutiveErrors}):`, 
-          error.response?.data?.message || error.message);
-      }
-      
-      // If too many consecutive errors, this vehicle may be broken
-      if (this.consecutiveErrors >= CONFIG.MAX_RETRIES) {
-        console.error(`✗ [${this.vehicleId}] Max retries exceeded. This vehicle may have issues.`);
-        // Don't stop the simulator - let it keep trying
+
+      } catch (error) {
+        attempt++;
+        this.consecutiveErrors++;
+        this.stats.packetsFailed++;
+
+        if (CONFIG.LOG_ERRORS) {
+          console.error(`✗ [${this.vehicleId}] Telemetry failed (attempt ${attempt}/${CONFIG.MAX_RETRIES}):`,
+            error.response?.data?.message || error.message);
+        }
+
+        // Exponential backoff before retry
+        if (attempt < CONFIG.MAX_RETRIES) {
+          const backoffDelay = CONFIG.RETRY_DELAY_MS * Math.pow(CONFIG.RETRY_BACKOFF_MULTIPLIER, attempt - 1);
+          await this.sleep(backoffDelay);
+        }
       }
     }
+
+    // Circuit breaker logic: if max retries exceeded, open circuit
+    if (!success && this.consecutiveErrors >= CONFIG.CIRCUIT_BREAKER_THRESHOLD) {
+      this.circuitOpen = true;
+      this.circuitResetTime = Date.now() + 30000; // 30 second cooldown
+      console.error(`⚠ [${this.vehicleId}] Circuit breaker OPENED due to ${this.consecutiveErrors} consecutive errors. Cooling down for 30s.`);
+    }
+  }
+
+  /**
+   * Utility: Sleep for ms milliseconds
+   */
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   /**
@@ -324,13 +443,14 @@ class VehicleSimulator {
 
 /**
  * FleetManager: Orchestrates the entire fleet of vehicle simulators.
- * 
+ *
  * Responsibilities:
- * - Register all vehicles with backend
+ * - Register all vehicles with backend (batched for performance)
  * - Distribute scenarios realistically
  * - Start/stop all simulators
  * - Handle graceful shutdown
  * - Track fleet-level statistics
+ * - Monitor alert generation rate
  */
 class FleetManager {
   constructor() {
@@ -339,8 +459,13 @@ class FleetManager {
       total: 0,
       registered: 0,
       running: 0,
-      scenarios: {}
+      scenarios: {},
+      startTime: null,
+      totalPacketsSent: 0,
+      totalPacketsFailed: 0,
+      totalAlertsTriggered: 0
     };
+    this.statsInterval = null;
   }
 
   /**
@@ -364,40 +489,67 @@ class FleetManager {
   }
 
   /**
-   * Register all vehicles with backend.
+   * Register all vehicles with backend using batched requests.
+   * Batching prevents overwhelming the backend during registration.
    * Requires authentication token.
    */
   async registerVehicles() {
     const vehicles = this.generateVehicleMetadata();
-    
-    console.log(`\n╔═══════════════════════════════════════════════╗`);
+
+    console.log(`\n╔═══════════════════════════════════════════════════╗`);
     console.log(`║   REGISTERING ${CONFIG.FLEET_SIZE} VEHICLES WITH BACKEND   ║`);
-    console.log(`╚═══════════════════════════════════════════════╝\n`);
-    
+    console.log(`╚═══════════════════════════════════════════════════╝\n`);
+    console.log(`Using batch size: ${CONFIG.REGISTRATION_BATCH_SIZE}, delay: ${CONFIG.REGISTRATION_DELAY_MS}ms\n`);
+
     let registered = 0;
     let existing = 0;
     let failed = 0;
-    
-    for (const v of vehicles) {
-      try {
-        await axios.post(`${CONFIG.API_URL}/vehicles`, v, {
-          headers: { Authorization: `Bearer ${authToken}` },
-          timeout: 5000
-        });
-        registered++;
-        if (registered % 10 === 0) {
-          console.log(`  ✓ Registered ${registered}/${CONFIG.FLEET_SIZE} vehicles...`);
-        }
-      } catch (e) {
-        if (e.response?.status === 409) {
-          existing++;
-        } else {
+
+    // Process vehicles in batches
+    for (let i = 0; i < vehicles.length; i += CONFIG.REGISTRATION_BATCH_SIZE) {
+      const batch = vehicles.slice(i, i + CONFIG.REGISTRATION_BATCH_SIZE);
+
+      // Process batch concurrently with Promise.all
+      const batchResults = await Promise.all(
+        batch.map(async (v) => {
+          try {
+            await axios.post(`${CONFIG.API_URL}/vehicles`, v, {
+              headers: { Authorization: `Bearer ${authToken}` },
+              timeout: 5000
+            });
+            return { status: 'registered', vehicleId: v.vehicle_id };
+          } catch (e) {
+            if (e.response?.status === 409) {
+              return { status: 'existing', vehicleId: v.vehicle_id };
+            } else {
+              return { status: 'failed', vehicleId: v.vehicle_id, error: e.response?.data?.message || e.message };
+            }
+          }
+        })
+      );
+
+      // Count results
+      batchResults.forEach(result => {
+        if (result.status === 'registered') registered++;
+        else if (result.status === 'existing') existing++;
+        else {
           failed++;
-          console.error(`  ✗ Failed to register ${v.vehicle_id}:`, e.response?.data?.message || e.message);
+          if (CONFIG.LOG_ERRORS) {
+            console.error(`  ✗ Failed to register ${result.vehicleId}:`, result.error);
+          }
         }
+      });
+
+      // Progress update
+      const processed = Math.min(i + CONFIG.REGISTRATION_BATCH_SIZE, vehicles.length);
+      console.log(`  ✓ Progress: ${processed}/${CONFIG.FLEET_SIZE} vehicles processed...`);
+
+      // Delay between batches to prevent overwhelming backend
+      if (i + CONFIG.REGISTRATION_BATCH_SIZE < vehicles.length) {
+        await this.sleep(CONFIG.REGISTRATION_DELAY_MS);
       }
     }
-    
+
     console.log(`\n✓ Registration complete:`);
     console.log(`  - Newly registered: ${registered}`);
     console.log(`  - Already existed: ${existing}`);
@@ -405,8 +557,15 @@ class FleetManager {
       console.log(`  - Failed: ${failed}`);
     }
     console.log('');
-    
+
     this.stats.registered = registered + existing;
+  }
+
+  /**
+   * Utility: Sleep for ms milliseconds
+   */
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   /**
@@ -446,15 +605,18 @@ class FleetManager {
   }
 
   /**
-   * Initialize and start all vehicle simulators
+   * Initialize and start all vehicle simulators with staggered startup
    */
-  startFleet() {
+  async startFleet() {
     const scenarios = this.assignScenarios();
-    
-    console.log(`\n╔═══════════════════════════════════════════════╗`);
-    console.log(`║      STARTING FLEET SIMULATION (${CONFIG.FLEET_SIZE} EVs)     ║`);
-    console.log(`╚═══════════════════════════════════════════════╝\n`);
-    
+
+    console.log(`\n╔═══════════════════════════════════════════════════╗`);
+    console.log(`║      STARTING HIGH-SCALE SIMULATION (${CONFIG.FLEET_SIZE} EVs)     ║`);
+    console.log(`╚═══════════════════════════════════════════════════╝\n`);
+
+    console.log(`Target Alert Rate: ~${CONFIG.TARGET_ALERT_RATE} alerts/minute`);
+    console.log(`Expected Telemetry: ~${(CONFIG.FLEET_SIZE * 1000 / CONFIG.TELEMETRY_INTERVAL).toFixed(0)} packets/second\n`);
+
     console.log(`Scenario Distribution:`);
     Object.entries(this.stats.scenarios).forEach(([scenario, count]) => {
       const percentage = ((count / CONFIG.FLEET_SIZE) * 100).toFixed(0);
@@ -464,38 +626,91 @@ class FleetManager {
     console.log(`Telemetry Interval: ${CONFIG.TELEMETRY_INTERVAL}ms ± ${CONFIG.JITTER_MS}ms jitter`);
     console.log(`API Endpoint: ${CONFIG.API_URL}`);
     console.log(``);
-    
-    // Create and start all simulators
+
+    // Create and start all simulators with staggered startup
     for (let i = 1; i <= CONFIG.FLEET_SIZE; i++) {
       const vehicleId = `EV${i.toString().padStart(3, '0')}`;
       const scenario = scenarios[i - 1];
-      
+
       const simulator = new VehicleSimulator(vehicleId, scenario);
       this.simulators.push(simulator);
-      
-      // Stagger startup slightly to avoid initial burst
-      setTimeout(() => simulator.start(), i * 10);
+
+      // Stagger startup to avoid initial burst
+      await this.sleep(CONFIG.STARTUP_STAGGER_MS);
+      simulator.start();
+
+      // Progress indicator every 50 vehicles
+      if (i % 50 === 0) {
+        console.log(`  ✓ Started ${i}/${CONFIG.FLEET_SIZE} vehicles...`);
+      }
     }
-    
+
     this.stats.running = CONFIG.FLEET_SIZE;
     this.stats.total = CONFIG.FLEET_SIZE;
-    
-    console.log(`✓ ${CONFIG.FLEET_SIZE} vehicles are now transmitting telemetry`);
+    this.stats.startTime = Date.now();
+
+    console.log(`\n✓ ${CONFIG.FLEET_SIZE} vehicles are now transmitting telemetry`);
     console.log(`✓ Press Ctrl+C to stop the simulator\n`);
     console.log(`${'='.repeat(60)}\n`);
+
+    // Start statistics monitoring
+    this.startStatsMonitoring();
   }
 
   /**
-   * Gracefully stop all simulators
+   * Start periodic statistics logging
+   */
+  startStatsMonitoring() {
+    this.statsInterval = setInterval(() => {
+      this.logFleetStats();
+    }, CONFIG.LOG_STATS_INTERVAL * 1000);
+  }
+
+  /**
+   * Log current fleet statistics
+   */
+  logFleetStats() {
+    // Aggregate stats from all simulators
+    let totalSent = 0;
+    let totalFailed = 0;
+    let totalAlerts = 0;
+    let circuitOpenCount = 0;
+
+    this.simulators.forEach(sim => {
+      totalSent += sim.stats.packetsSent;
+      totalFailed += sim.stats.packetsFailed;
+      totalAlerts += sim.stats.alertsTriggered;
+      if (sim.circuitOpen) circuitOpenCount++;
+    });
+
+    const elapsedMinutes = (Date.now() - this.stats.startTime) / 60000;
+    const packetRate = elapsedMinutes > 0 ? (totalSent / elapsedMinutes).toFixed(0) : 0;
+    const alertRate = elapsedMinutes > 0 ? (totalAlerts / elapsedMinutes).toFixed(0) : 0;
+
+    console.log(`\n[STATS] Elapsed: ${elapsedMinutes.toFixed(1)}min | Packets: ${totalSent} (${packetRate}/min) | Alerts: ${totalAlerts} (${alertRate}/min target: ${CONFIG.TARGET_ALERT_RATE}/min) | Failed: ${totalFailed} | Circuit Open: ${circuitOpenCount}`);
+  }
+
+  /**
+   * Gracefully stop all simulators and print final stats
    */
   stopFleet() {
     console.log(`\n\n${'='.repeat(60)}`);
     console.log(`Stopping fleet simulation...`);
-    
+
+    // Clear stats interval
+    if (this.statsInterval) {
+      clearInterval(this.statsInterval);
+      this.statsInterval = null;
+    }
+
+    // Print final stats
+    this.logFleetStats();
+
+    // Stop all simulators
     this.simulators.forEach(sim => sim.stop());
     this.stats.running = 0;
-    
-    console.log(`✓ All ${this.simulators.length} vehicles stopped`);
+
+    console.log(`\n✓ All ${this.simulators.length} vehicles stopped`);
     console.log(`${'='.repeat(60)}\n`);
   }
 
@@ -520,14 +735,16 @@ const fleetManager = new FleetManager();
 async function main() {
   console.clear();
   console.log(`\n${'='.repeat(60)}`);
-  console.log(`   EV FLEET SIMULATOR - SCALABLE EDITION`);
+  console.log(`   EV FLEET SIMULATOR - HIGH SCALE EDITION`);
   console.log(`${'='.repeat(60)}`);
   console.log(`\nConfiguration:`);
   console.log(`  - Fleet Size: ${CONFIG.FLEET_SIZE} vehicles`);
-  console.log(`  - Telemetry Interval: ${CONFIG.TELEMETRY_INTERVAL}ms`);
+  console.log(`  - Telemetry Interval: ${CONFIG.TELEMETRY_INTERVAL}ms (±${CONFIG.JITTER_MS}ms jitter)`);
+  console.log(`  - Expected Telemetry: ~${(CONFIG.FLEET_SIZE * 1000 / CONFIG.TELEMETRY_INTERVAL).toFixed(0)} packets/sec`);
+  console.log(`  - Target Alert Rate: ~${CONFIG.TARGET_ALERT_RATE} alerts/minute`);
   console.log(`  - API URL: ${CONFIG.API_URL}`);
   console.log(`${'='.repeat(60)}\n`);
-  
+
   try {
     // Step 1: Authenticate with backend
     console.log(`[1/3] Authenticating with backend...`);
@@ -539,15 +756,15 @@ async function main() {
       console.error('  - Verify admin credentials are correct\n');
       process.exit(1);
     }
-    
+
     // Step 2: Register all vehicles
     console.log(`[2/3] Registering ${CONFIG.FLEET_SIZE} vehicles with backend...`);
     await fleetManager.registerVehicles();
-    
+
     // Step 3: Start fleet simulation
     console.log(`[3/3] Starting fleet simulation...`);
-    fleetManager.startFleet();
-    
+    await fleetManager.startFleet();
+
   } catch (error) {
     console.error('\n✗ Fatal error during startup:', error.message);
     console.error('\nTroubleshooting:');

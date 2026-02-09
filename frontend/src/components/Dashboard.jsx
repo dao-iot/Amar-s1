@@ -28,15 +28,25 @@ const Dashboard = ({ user, onLogout }) => {
           axios.get('/api/v1/vehicles'),
           axios.get('/api/v1/alerts')
         ]);
-        
+
+        // Validate response data before processing
+        const vehicleData = vRes.data?.data || [];
+        const alertData = aRes.data?.data || [];
+
         const initialVehicles = {};
-        vRes.data.data.forEach(v => {
-          initialVehicles[v.vehicle_id] = { ...v, status: v.last_seen ? 'online' : 'offline' };
+        vehicleData.forEach(v => {
+          if (v && v.vehicle_id) {
+            initialVehicles[v.vehicle_id] = { ...v, status: v.last_seen ? 'online' : 'offline' };
+          }
         });
         setVehicles(initialVehicles);
-        setAlerts(aRes.data.data);
+        setAlerts(alertData);
       } catch (error) {
         console.error('Initialization error:', error);
+        // Don't crash on auth errors - the global interceptor will handle logout
+        if (error.response?.status !== 401) {
+          // For non-auth errors, we could show a user-friendly message here
+        }
       }
     };
     fetchData();

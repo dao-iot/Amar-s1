@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Search, Filter, AlertCircle, CheckCircle2, Wifi, Radio } from 'lucide-react';
+import { Search, Filter, AlertCircle, CheckCircle2, Wifi, Radio, Database } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '../utils/ui-utils';
 
@@ -92,6 +92,9 @@ const AssetList = ({ vehicles, selectedId, onSelect, activeAlerts }) => {
    */
   const filteredVehicles = useMemo(() => {
     return Object.values(vehicles).filter(v => {
+      // Skip invalid vehicle entries
+      if (!v || !v.vehicle_id) return false;
+
       // 1. Search Filter
       const matchesSearch = v.vehicle_id.toLowerCase().includes(debouncedSearch.toLowerCase());
       if (!matchesSearch) return false;
@@ -204,6 +207,6 @@ const FilterButton = ({ active, onClick, label, variant = 'info' }) => (
   </button>
 );
 
-const Database = ({ size, className }) => <Radio size={size} className={className} />;
+
 
 export default AssetList;
