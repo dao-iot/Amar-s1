@@ -4,16 +4,69 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { ShieldAlert, ShieldCheck, Activity, Zap, Thermometer, Battery as BatteryIcon, Clock } from 'lucide-react';
 import { cn, units } from '../utils/ui-utils';
 
-const VehicleCard = ({ vehicle, isSelected, onSelect }) => {
+/**
+ * VehicleCard - Enhanced with Alert Summary
+ * 
+ * UX PRINCIPLE: Shows vehicle health status and active alerts at a glance
+ * - Displays alert count and severity in the health badge
+ * - Color-coded based on highest severity alert
+ */
+const VehicleCard = ({ vehicle, alerts = [], isSelected, onSelect }) => {
   const { vehicle_id, data, status, timestamp } = vehicle;
   const isOffline = status === 'offline';
-  
-  // Health score calculation (mock logic)
+
+  // Calculate alert summary
+  const alertSummary = React.useMemo(() => {
+    const critical = alerts.filter(a => a.severity === 'CRITICAL').length;
+    const warning = alerts.filter(a => a.severity === 'WARNING').length;
+    const info = alerts.filter(a => a.severity === 'INFO').length;
+    return { critical, warning, info, total: alerts.length };
+  }, [alerts]);
+
+  // Health score calculation based on alerts and telemetry
   const getHealthStatus = () => {
-    if (isOffline) return { label: 'OFFLINE', color: 'text-slate-500', bg: 'bg-slate-500/10', border: 'border-slate-500/20' };
-    if (data?.soc < 15 || data?.motor_temp > 95) return { label: 'CRITICAL', color: 'text-red-400', bg: 'bg-red-500/10', border: 'border-red-500/30' };
-    if (data?.soc < 25 || data?.motor_temp > 80) return { label: 'WARNING', color: 'text-amber-400', bg: 'bg-amber-500/10', border: 'border-amber-500/30' };
-    return { label: 'OPTIMAL', color: 'text-emerald-400', bg: 'bg-emerald-500/10', border: 'border-emerald-500/30' };
+    if (isOffline) return { 
+      label: 'OFFLINE', 
+      color: 'text-slate-500', 
+      bg: 'bg-slate-500/10', 
+      border: 'border-slate-500/20',
+      alertText: ''
+    };
+    if (alertSummary.critical > 0) return { 
+      label: 'CRITICAL', 
+      color: 'text-red-400', 
+      bg: 'bg-red-500/10', 
+      border: 'border-red-500/30',
+      alertText: `${alertSummary.critical} Alert${alertSummary.critical > 1 ? 's' : ''}`
+    };
+    if (alertSummary.warning > 0) return { 
+      label: 'WARNING', 
+      color: 'text-amber-400', 
+      bg: 'bg-amber-500/10', 
+      border: 'border-amber-500/30',
+      alertText: `${alertSummary.warning} Alert${alertSummary.warning > 1 ? 's' : ''}`
+    };
+    if (data?.soc < 15 || data?.motor_temp > 95) return { 
+      label: 'CRITICAL', 
+      color: 'text-red-400', 
+      bg: 'bg-red-500/10', 
+      border: 'border-red-500/30',
+      alertText: 'Telemetry Critical'
+    };
+    if (data?.soc < 25 || data?.motor_temp > 80) return { 
+      label: 'WARNING', 
+      color: 'text-amber-400', 
+      bg: 'bg-amber-500/10', 
+      border: 'border-amber-500/30',
+      alertText: 'Telemetry Warning'
+    };
+    return { 
+      label: 'OPTIMAL', 
+      color: 'text-emerald-400', 
+      bg: 'bg-emerald-500/10', 
+      border: 'border-emerald-500/30',
+      alertText: alertSummary.total > 0 ? `${alertSummary.total} Info` : 'No Alerts'
+    };
   };
 
   const health = getHealthStatus();
@@ -48,11 +101,16 @@ const VehicleCard = ({ vehicle, isSelected, onSelect }) => {
           </p>
         </div>
         <div className="flex flex-col items-end">
-          <div className={cn("px-2 py-0.5 rounded text-[10px] font-bold mb-2 flex items-center gap-1", health.bg, health.color, "border", health.border)}>
+          <div className={cn("px-2 py-0.5 rounded text-[10px] font-bold mb-1 flex items-center gap-1", health.bg, health.color, "border", health.border)}>
             {health.label === 'OPTIMAL' ? <ShieldCheck size={10} /> : <ShieldAlert size={10} />}
             {health.label}
           </div>
-          <div className={cn("pulse-dot", !isOffline ? "before:bg-ev-green" : "before:bg-slate-500")} />
+          {health.alertText && (
+            <span className={cn("text-[9px] font-mono", health.color)}>
+              {health.alertText}
+            </span>
+          )}
+          <div className={cn("pulse-dot mt-2", !isOffline ? "before:bg-ev-green" : "before:bg-slate-500")} />
         </div>
       </div>
 

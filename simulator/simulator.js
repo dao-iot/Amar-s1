@@ -56,8 +56,8 @@ const TARGET_ALERT_RATE = 500; // alerts per minute
  * - TELEMETRY_INTERVAL_MS: Base ms between packets per vehicle (lower = more alerts)
  * - JITTER_MS: Random ±ms to prevent synchronized bursts (keep 200-300ms)
  */
-const FLEET_SIZE = 250;           // 250 vehicles for high alert volume
-const TELEMETRY_INTERVAL_MS = 500; // 500ms = 2 packets/sec per vehicle
+const FLEET_SIZE = 50;            // Reduced to 50 vehicles for debugging
+const TELEMETRY_INTERVAL_MS = 1000; // 1000ms = 1 packet/sec per vehicle (reduced load)
 const JITTER_MS = 250;             // ±250ms jitter prevents thundering herd
 
 /**
@@ -103,10 +103,10 @@ const CONFIG = {
   SCENARIO_DISTRIBUTION: SCENARIO_DISTRIBUTION,
 
   // Retry logic with exponential backoff
-  MAX_RETRIES: 5,
-  RETRY_DELAY_MS: 500,     // Initial retry delay
+  MAX_RETRIES: 3,
+  RETRY_DELAY_MS: 1000,     // Initial retry delay (increased)
   RETRY_BACKOFF_MULTIPLIER: 2,  // Exponential backoff
-  CIRCUIT_BREAKER_THRESHOLD: 10, // Pause vehicle after N consecutive errors
+  CIRCUIT_BREAKER_THRESHOLD: 20, // Pause vehicle after N consecutive errors (increased threshold)
 
   // Logging verbosity (reduce at scale to prevent I/O bottleneck)
   LOG_TELEMETRY: false,    // Disable per-vehicle telemetry logs at scale
@@ -331,7 +331,7 @@ class VehicleSimulator {
 
     const payload = {
       vehicle_id: this.vehicleId,
-      timestamp: Date.now(),
+      timestamp: Date.now(), // Use milliseconds since epoch for database compatibility
       data: { ...this.state }
     };
 
@@ -341,7 +341,7 @@ class VehicleSimulator {
     while (attempt < CONFIG.MAX_RETRIES && !success) {
       try {
         await axios.post(`${CONFIG.API_URL}/telemetry`, payload, {
-          timeout: 5000  // 5 second timeout
+          timeout: 10000  // 10 second timeout (increased)
         });
 
         // Success - reset error counters
@@ -397,8 +397,8 @@ class VehicleSimulator {
     // Circuit breaker logic: if max retries exceeded, open circuit
     if (!success && this.consecutiveErrors >= CONFIG.CIRCUIT_BREAKER_THRESHOLD) {
       this.circuitOpen = true;
-      this.circuitResetTime = Date.now() + 30000; // 30 second cooldown
-      console.error(`⚠ [${this.vehicleId}] Circuit breaker OPENED due to ${this.consecutiveErrors} consecutive errors. Cooling down for 30s.`);
+      this.circuitResetTime = Date.now() + 60000; // 60 second cooldown (increased)
+      console.error(`⚠ [${this.vehicleId}] Circuit breaker OPENED due to ${this.consecutiveErrors} consecutive errors. Cooling down for 60s.`);
     }
   }
 

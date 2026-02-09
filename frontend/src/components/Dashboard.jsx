@@ -1,15 +1,18 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import socketService from '../services/socket';
 import AssetList from './AssetList';
-import AlertPanel from './AlertPanel';
+import FleetHealthSummary from './FleetHealthSummary';
+import AlertVisualizationDashboard from './AlertVisualizationDashboard';
+import EnhancedVehicleAlertPanel from './EnhancedVehicleAlertPanel';
+import NonIntrusiveAlertIndicator from './NonIntrusiveAlertIndicator';
 import Charts from './Charts';
 import VehicleHistory from './VehicleHistory';
 import VehicleManagement from './VehicleManagement';
-import VehicleCard from './VehicleCard'; // Keeping for detail view
+import VehicleCard from './VehicleCard';
 import { formatTime } from '../utils/formatters';
 import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Activity, Car, AlertCircle, Radio, Database, ShieldCheck, LogOut } from 'lucide-react';
+import { Activity, Car, AlertCircle, Radio, Database, ShieldCheck, LogOut, LayoutDashboard } from 'lucide-react';
 import { cn } from '../utils/ui-utils';
 
 const Dashboard = ({ user, onLogout }) => {
@@ -33,12 +36,41 @@ const Dashboard = ({ user, onLogout }) => {
         const vehicleData = vRes.data?.data || [];
         const alertData = aRes.data?.data || [];
 
+        // Fetch current telemetry for each vehicle
+        const vehiclesWithTelemetry = await Promise.all(
+          vehicleData.map(async (v) => {
+            if (v && v.vehicle_id) {
+              try {
+                const telemetryRes = await axios.get(`/api/v1/telemetry/current/${v.vehicle_id}`);
+                const telemetryData = telemetryRes.data?.data;
+                return {
+                  ...v,
+                  status: v.last_seen ? 'online' : 'offline',
+                  data: telemetryData?.data || {}, // Extract the actual telemetry metrics
+                  timestamp: telemetryData?.timestamp || v.last_seen
+                };
+              } catch (error) {
+                // If telemetry fetch fails, return vehicle with basic data
+                console.warn(`Failed to fetch telemetry for ${v.vehicle_id}:`, error.message);
+                return {
+                  ...v,
+                  status: v.last_seen ? 'online' : 'offline',
+                  data: {},
+                  timestamp: v.last_seen
+                };
+              }
+            }
+            return null;
+          })
+        );
+
         const initialVehicles = {};
-        vehicleData.forEach(v => {
-          if (v && v.vehicle_id) {
-            initialVehicles[v.vehicle_id] = { ...v, status: v.last_seen ? 'online' : 'offline' };
-          }
-        });
+        vehiclesWithTelemetry
+          .filter(v => v && v.vehicle_id)
+          .forEach(v => {
+            initialVehicles[v.vehicle_id] = v;
+          });
+
         setVehicles(initialVehicles);
         setAlerts(alertData);
       } catch (error) {
@@ -54,16 +86,25 @@ const Dashboard = ({ user, onLogout }) => {
 
   useEffect(() => {
     const socket = socketService.connect();
-
+    
     socket.on('connect', () => {
       setConnectionStatus('connected');
-      socketService.subscribeToAll();
+      // Subscribe to all vehicle telemetry updates
+      socket.emit('subscribe', { vehicle_id: 'all' });
     });
-
-    socket.on('reconnect_attempt', () => setConnectionStatus('reconnecting'));
     socket.on('disconnect', () => setConnectionStatus('disconnected'));
-    socket.on('connect_error', () => setConnectionStatus('disconnected'));
-
+    socket.on('connect_error', () => setConnectionStatus('error'));
+    
+    // Listen for state-based alert updates (not event spam)
+    socket.on('alert_state_update', (data) => {
+      const newAlert = data.alert;
+      setAlerts(prev => {
+        // Prevent duplicates
+        if (prev.some(a => a.alert_id === newAlert.alert_id)) return prev;
+        return [...prev, newAlert];
+      });
+    });
+    
     socket.on('telemetry_update', (data) => {
       setVehicles(prev => ({
         ...prev,
@@ -77,20 +118,51 @@ const Dashboard = ({ user, onLogout }) => {
 
       setHistory(prev => {
         const vehicleHistory = prev[data.vehicle_id] || [];
-        const newPoint = {
-          time: formatTime(data.timestamp),
-          speed: data.data.speed,
-          battery_voltage: data.data.battery_voltage,
-          timestamp: data.timestamp
+        
+        // Extract and validate telemetry values
+        const speedValue = data.data?.speed;
+        const voltageValue = data.data?.battery_voltage;
+        const timestamp = data.timestamp;
+        
+        // Create history point with validated numeric values
+        const historyPoint = {
+          time: formatTime(timestamp),
+          timestamp: timestamp
         };
         
-        const updated = [...vehicleHistory, newPoint].filter(p => p.timestamp > Date.now() - 300000);
-        return { ...prev, [data.vehicle_id]: updated };
+        // Only add fields that have valid numeric values
+        if (speedValue !== undefined && speedValue !== null && !isNaN(Number(speedValue))) {
+          historyPoint.speed = Number(speedValue);
+        }
+        
+        if (voltageValue !== undefined && voltageValue !== null && !isNaN(Number(voltageValue))) {
+          historyPoint.battery_voltage = Number(voltageValue);
+        }
+        
+        // Only add point if we have at least one valid metric
+        if (historyPoint.speed !== undefined || historyPoint.battery_voltage !== undefined) {
+          const updated = [...vehicleHistory, historyPoint].filter(p => p.timestamp > Date.now() - 300000);
+          return { ...prev, [data.vehicle_id]: updated };
+        }
+        
+        return prev;
       });
     });
 
     socket.on('new_alert', (data) => {
       setAlerts(prev => [data.alert, ...prev]);
+    });
+
+    // Listen for alert acknowledgment updates
+    socket.on('alert_acknowledged', (data) => {
+      handleAlertAcknowledged(data);
+    });
+
+    // Listen for alert summary updates
+    socket.on('alert_summary', (data) => {
+      // This is a periodic summary - we could use it to trigger stats refresh
+      // For now, we'll let the components poll their own stats
+      console.log('Alert summary received:', data);
     });
 
     socket.on('vehicle_status', (data) => {
@@ -110,14 +182,19 @@ const Dashboard = ({ user, onLogout }) => {
     setAlerts(prev => prev.filter(a => a.alert_id !== alertId));
   }, []);
 
+  // Handle WebSocket alert acknowledgment updates
+  const handleAlertAcknowledged = useCallback((data) => {
+    setAlerts(prev => prev.map(alert => 
+      alert.alert_id === data.alert_id 
+        ? { ...alert, acknowledged_at: data.acknowledged_at }
+        : alert
+    ));
+  }, []);
+
   const handleCorrelate = useCallback((alert) => {
-    // 1. Switch to the vehicle that triggered the alert
+    // Switch to the vehicle that triggered the alert
     setSelectedVehicleId(alert.vehicle_id);
-    
-    // 2. Set the correlation timestamp (formatted for chart matching)
     setCorrelateTime(formatTime(alert.created_at));
-    
-    // 3. Optional: Clear correlation after 10s or when new selection happens
     setTimeout(() => setCorrelateTime(null), 10000);
   }, []);
 
@@ -125,8 +202,25 @@ const Dashboard = ({ user, onLogout }) => {
     setIsManagementOpen(prev => !prev);
   };
 
+  // Filter to show only critical vehicles (those with critical alerts)
+  const handleViewCritical = useCallback(() => {
+    const criticalVehicleIds = new Set(
+      alerts.filter(a => a.severity === 'CRITICAL').map(a => a.vehicle_id)
+    );
+    const firstCritical = Array.from(criticalVehicleIds)[0];
+    if (firstCritical) {
+      setSelectedVehicleId(firstCritical);
+    }
+  }, [alerts]);
+
   const totalVehicles = Object.keys(vehicles).length;
   const onlineCount = Object.values(vehicles).filter(v => v.status === 'online').length;
+
+  // Get alerts for selected vehicle
+  const selectedVehicleAlerts = useMemo(() => {
+    if (!selectedVehicleId) return [];
+    return alerts.filter(a => a.vehicle_id === selectedVehicleId);
+  }, [alerts, selectedVehicleId]);
 
   const isAdmin = user?.role === 'admin';
 
@@ -173,7 +267,10 @@ const Dashboard = ({ user, onLogout }) => {
           </div>
 
           <StatBox label="ACTIVE ASSETS" value={onlineCount} total={totalVehicles} icon={<Car size={14} />} color="text-ev-green" />
-          <StatBox label="SYSTEM ALERTS" value={alerts.length} icon={<AlertCircle size={14} />} color={alerts.length > 0 ? "text-ev-red" : "text-ev-blue"} />
+          <StatBox label="FLEET HEALTH" value={totalVehicles > 0 ? Math.round((Object.values(vehicles).filter(v => {
+            const vehicleAlerts = alerts.filter(a => a.vehicle_id === v.vehicle_id);
+            return !vehicleAlerts.some(a => a.severity === 'CRITICAL' || a.severity === 'WARNING');
+          }).length / totalVehicles) * 100) : 100} icon={<LayoutDashboard size={14} />} color="text-ev-blue" suffix="%" />
           
           <div className={cn(
             "px-4 py-2 rounded-full border flex items-center gap-2 transition-all duration-500",
@@ -193,10 +290,10 @@ const Dashboard = ({ user, onLogout }) => {
         </div>
       </header>
 
-      <div className="grid grid-cols-1 xl:grid-cols-12 gap-8 relative z-10">
+      <div className="space-y-6 relative z-10">
         <AnimatePresence>
           {isManagementOpen && (
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, scale: 0.98 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.98 }}
@@ -206,92 +303,138 @@ const Dashboard = ({ user, onLogout }) => {
             </motion.div>
           )}
         </AnimatePresence>
-        
-        {/* Left Side: Asset Registry & Alerts */}
-        <div className="xl:col-span-4 flex flex-col gap-8 h-[calc(100vh-180px)]">
-          {/* Emergency Feed (Top Left) */}
-          <section className="flex flex-col flex-[0.4] min-h-[250px]">
-            <SectionHeader title="Emergency Feed" icon={<AlertCircle size={14} />} />
-            <AlertPanel 
-              alerts={alerts} 
-              onAlertAck={handleAlertAck} 
-              onCorrelate={handleCorrelate} 
-              isAdmin={isAdmin}
-            />
-          </section>
 
-          {/* Asset List Registry (Bottom Left) */}
-          <section className="flex-1 flex flex-col overflow-hidden">
-            <AssetList 
-              vehicles={vehicles}
-              selectedId={selectedVehicleId}
-              onSelect={setSelectedVehicleId}
-              activeAlerts={alerts}
-            />
-          </section>
-        </div>
+        {/* Top: Fleet Health Summary */}
+        <section>
+          <FleetHealthSummary 
+            alerts={alerts} 
+            vehicles={vehicles} 
+            className="mb-6"
+          />
+        </section>
 
-        {/* Right Side: Detailed Analytics & Status */}
-        <div className="xl:col-span-8 h-[calc(100vh-180px)] flex flex-col gap-8">
-          <section className="h-full flex flex-col overflow-hidden">
-            <SectionHeader 
-              title={selectedVehicleId ? `Telemetry Node: ${selectedVehicleId}` : "Select Node for Telemetry"} 
-              icon={<Activity size={14} />} 
-            />
-            <div className="glass-panel p-8 flex-1 border-white/5 bg-gradient-to-br from-white/[0.03] to-transparent overflow-y-auto custom-scrollbar">
-              {selectedVehicleId ? (
-                <>
-                  {/* Summary Card for Active Vehicle */}
-                  <div className="mb-8 max-w-sm">
-                    <VehicleCard 
-                      vehicle={vehicles[selectedVehicleId]} 
-                      isSelected={false} 
-                      onSelect={() => {}} 
+        {/* Top: Alert Visualization Dashboard */}
+        <section>
+          <AlertVisualizationDashboard 
+            alerts={alerts} 
+            vehicles={vehicles}
+            className="mb-6"
+          />
+        </section>
+
+        {/* Human Factors Alert Status Indicator */}
+        <section className="mb-6">
+          <NonIntrusiveAlertIndicator 
+            alerts={alerts} 
+            vehicles={vehicles}
+            className="border-white/5 bg-white/[0.02]"
+          />
+        </section>
+
+        {/* Bottom: Asset Registry and Vehicle Details */}
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
+          {/* Left Side: Asset Registry */}
+          <div className="xl:col-span-3 flex flex-col gap-6 h-[calc(100vh-380px)]">
+            <section className="flex-1 flex flex-col overflow-hidden">
+              <AssetList
+                vehicles={vehicles}
+                selectedId={selectedVehicleId}
+                onSelect={setSelectedVehicleId}
+                activeAlerts={alerts}
+              />
+            </section>
+          </div>
+
+          {/* Center: Detailed Analytics & Status */}
+          <div className="xl:col-span-6 h-[calc(100vh-380px)] flex flex-col gap-6">
+            <section className="h-full flex flex-col overflow-hidden">
+              <SectionHeader
+                title={selectedVehicleId ? `Telemetry Node: ${selectedVehicleId}` : "Select Node for Telemetry"}
+                icon={<Activity size={14} />}
+              />
+              <div className="glass-panel p-6 flex-1 border-white/5 bg-gradient-to-br from-white/[0.03] to-transparent overflow-y-auto custom-scrollbar">
+                {selectedVehicleId ? (
+                  <>
+                    {/* Summary Card for Active Vehicle */}
+                    <div className="mb-6 max-w-sm">
+                      <VehicleCard
+                        vehicle={vehicles[selectedVehicleId]}
+                        alerts={selectedVehicleAlerts}
+                        isSelected={false}
+                        onSelect={() => {}}
+                      />
+                    </div>
+
+                    <Charts
+                      vehicleId={selectedVehicleId}
+                      data={history[selectedVehicleId] || []}
+                      highlightTime={correlateTime}
                     />
+
+                    <VehicleHistory vehicleId={selectedVehicleId} />
+
+                    <motion.div
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="mt-6 pt-6 border-t border-white/5 grid grid-cols-3 gap-6"
+                    >
+                      <DataNode label="NETWORK STATUS" value="STABLE" icon={<Radio size={12}/>} color="text-ev-green" />
+                      <DataNode label="LAST DB SYNC" value={formatTime(vehicles[selectedVehicleId]?.timestamp)} icon={<Database size={12}/>} color="text-slate-400" />
+                      <DataNode label="ENCRYPTION" value="AES-256" icon={<ShieldCheck size={12}/>} color="text-ev-blue" />
+                    </motion.div>
+                  </>
+                ) : (
+                  <div className="h-full flex items-center justify-center border-dashed border-2 border-white/5 rounded-2xl">
+                    <div className="text-center space-y-4">
+                      <Database size={48} className="text-slate-800 mx-auto" />
+                      <p className="text-xs font-mono text-slate-600 uppercase tracking-[0.3em]">Awaiting Asset Selection</p>
+                    </div>
                   </div>
+                )}
+              </div>
+            </section>
+          </div>
 
-                  <Charts 
-                    vehicleId={selectedVehicleId} 
-                    data={history[selectedVehicleId] || []} 
-                    highlightTime={correlateTime}
-                  />
-
-                  <VehicleHistory vehicleId={selectedVehicleId} />
-                  
-                  <motion.div 
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    className="mt-8 pt-8 border-t border-white/5 grid grid-cols-3 gap-8"
-                  >
-                    <DataNode label="NETWORK STATUS" value="STABLE" icon={<Radio size={12}/>} color="text-ev-green" />
-                    <DataNode label="LAST DB SYNC" value={formatTime(vehicles[selectedVehicleId]?.timestamp)} icon={<Database size={12}/>} color="text-slate-400" />
-                    <DataNode label="ENCRYPTION" value="AES-256" icon={<ShieldCheck size={12}/>} color="text-ev-blue" />
-                  </motion.div>
-                </>
+          {/* Right Side: Vehicle-Specific Alerts */}
+          <div className="xl:col-span-3 h-[calc(100vh-380px)] flex flex-col">
+            <section className="h-full flex flex-col overflow-hidden">
+              <SectionHeader
+                title={selectedVehicleId ? "Vehicle Alerts" : "Select Vehicle"}
+                icon={<AlertCircle size={14} />}
+              />
+              {selectedVehicleId ? (
+                <EnhancedVehicleAlertPanel
+                  vehicleId={selectedVehicleId}
+                  alerts={alerts}
+                  isAdmin={isAdmin}
+                  onAlertAck={handleAlertAck}
+                />
               ) : (
-                <div className="h-full flex items-center justify-center border-dashed border-2 border-white/5 rounded-2xl">
-                  <div className="text-center space-y-4">
-                    <Database size={48} className="text-slate-800 mx-auto" />
-                    <p className="text-xs font-mono text-slate-600 uppercase tracking-[0.3em]">Awaiting Asset Selection</p>
+                <div className="glass-panel border-white/5 bg-white/[0.02] flex-1 flex items-center justify-center">
+                  <div className="text-center px-4">
+                    <AlertCircle size={32} className="text-slate-700 mx-auto mb-3" />
+                    <p className="text-[10px] font-mono text-slate-600 uppercase tracking-widest">
+                      Select a vehicle to view its alerts
+                    </p>
                   </div>
                 </div>
               )}
-            </div>
-          </section>
+            </section>
+          </div>
         </div>
       </div>
     </div>
   );
 };
 
-const StatBox = ({ label, value, total, icon, color }) => (
+const StatBox = ({ label, value, total, icon, color, suffix = "" }) => (
   <div className="flex flex-col items-end gap-1">
     <div className="flex items-center gap-1.5 text-[10px] font-black text-slate-500 uppercase tracking-tighter">
       {icon}
       {label}
     </div>
     <div className={cn("text-xl font-black italic metric-value", color)}>
-      {value}{total !== undefined && <span className="text-xs text-slate-600 ml-1">/ {total}</span>}
+      {value}{suffix}{total !== undefined && <span className="text-xs text-slate-600 ml-1">/ {total}</span>}
     </div>
   </div>
 );

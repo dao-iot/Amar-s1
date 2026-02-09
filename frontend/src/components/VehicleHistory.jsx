@@ -36,7 +36,23 @@ const VehicleHistory = ({ vehicleId }) => {
           }
         });
 
-        setHistory(response.data.data || []);
+        // Validate and sanitize the history data
+        const rawData = response.data.data || [];
+        console.log('[VehicleHistory] Raw history data:', rawData);
+        
+        const sanitizedData = rawData.map(item => ({
+          ...item,
+          // Ensure data field is parsed if it's a string
+          data: typeof item.data === 'string' ? JSON.parse(item.data) : item.data,
+          timestamp: item.timestamp
+        })).filter(item => {
+          // Validate that we have the required telemetry data
+          const data = typeof item.data === 'string' ? JSON.parse(item.data) : item.data;
+          return data && (data.speed !== undefined || data.battery_voltage !== undefined);
+        });
+
+        console.log('[VehicleHistory] Sanitized history data:', sanitizedData);
+        setHistory(sanitizedData);
       } catch (error) {
         console.error('History fetch error:', error);
         // Gracefully handle errors without blocking the UI

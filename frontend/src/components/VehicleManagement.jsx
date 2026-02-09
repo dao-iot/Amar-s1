@@ -237,45 +237,32 @@ const VehicleManagement = ({ user, onClose }) => {
         )}
       </AnimatePresence>
 
-      {/* Toast Notification */}
-      <AnimatePresence>
-        {toast && (
-          <motion.div 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -20 }}
-            className="fixed bottom-8 right-8 z-[80] max-w-md"
-          >
-            <div className={cn(
-              "glass-panel p-4 border flex items-center gap-3 shadow-2xl",
-              toast.type === 'success' && "border-ev-green/30 bg-ev-green/5",
-              toast.type === 'warning' && "border-ev-yellow/30 bg-ev-yellow/5",
-              toast.type === 'error' && "border-ev-red/30 bg-ev-red/5"
-            )}>
+      {/* Non-intrusive status indicator - Human Factors Compliant */}
+      {toast && (
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -20 }}
+          className="fixed bottom-8 right-8 z-[80] max-w-xs"
+        >
+          <div className={cn(
+            "glass-panel p-3 border text-[9px] font-mono uppercase tracking-tight",
+            toast.type === 'success' && "border-ev-green/30 bg-ev-green/5 text-ev-green",
+            toast.type === 'warning' && "border-ev-yellow/30 bg-ev-yellow/5 text-ev-yellow",
+            toast.type === 'error' && "border-ev-red/30 bg-ev-red/5 text-ev-red"
+          )}>
+            <div className="flex items-center gap-2">
               <div className={cn(
-                "w-2 h-2 rounded-full",
-                toast.type === 'success' && "bg-ev-green shadow-[0_0_10px_#00ff9d]",
-                toast.type === 'warning' && "bg-ev-yellow shadow-[0_0_10px_#ffcc00]",
-                toast.type === 'error' && "bg-ev-red shadow-[0_0_10px_#ff4d4d]"
+                "w-1.5 h-1.5 rounded-full",
+                toast.type === 'success' && "bg-ev-green",
+                toast.type === 'warning' && "bg-ev-yellow",
+                toast.type === 'error' && "bg-ev-red"
               )} />
-              <p className={cn(
-                "text-[10px] font-mono uppercase tracking-tight leading-relaxed flex-1",
-                toast.type === 'success' && "text-ev-green",
-                toast.type === 'warning' && "text-ev-yellow",
-                toast.type === 'error' && "text-ev-red"
-              )}>
-                {toast.message}
-              </p>
-              <button 
-                onClick={() => setToast(null)}
-                className="text-slate-600 hover:text-white transition-colors"
-              >
-                <X size={14} />
-              </button>
+              {toast.message}
             </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          </div>
+        </motion.div>
+      )}
     </div>
   );
 };

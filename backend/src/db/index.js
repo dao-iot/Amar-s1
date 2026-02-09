@@ -19,10 +19,10 @@ const pool = new Pool({
   // Connection pool sizing for high throughput
   // Formula: (core_count * 2) + effective_spindle_count = ~20 for typical dev machines
   // With high concurrency from 250 vehicles, we need more connections
-  max: 30,                    // Maximum connections in pool (default: 10)
-  min: 5,                     // Minimum connections to maintain (default: 0)
+  max: 50,                    // Maximum connections in pool (default: 10)
+  min: 10,                     // Minimum connections to maintain (default: 0)
   idleTimeoutMillis: 30000,   // Close idle connections after 30s (default: 10000)
-  connectionTimeoutMillis: 5000, // Timeout for new connections (default: 0)
+  connectionTimeoutMillis: 10000, // Timeout for new connections (default: 0)
 
   // Performance tuning
   statement_timeout: 10000,   // Max query execution time (10s)

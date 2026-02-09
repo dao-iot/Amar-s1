@@ -1,7 +1,9 @@
 const subscriptionManager = require('./subscriptions');
+const alertApiService = require('../services/alert.api.service');
 
 /**
  * Broadcaster for WebSocket Events with Throttling logic
+ * Includes periodic alert summary broadcasts for UI aggregation
  */
 class Broadcaster {
   constructor() {
@@ -9,13 +11,75 @@ class Broadcaster {
     // Map<vehicle_id, last_broadcast_timestamp> for throttling
     this.lastBroadcastTimes = new Map();
     this.THROTTLE_MS = 500; // 2 updates per second
+    
+    // Summary broadcast configuration
+    this.summaryInterval = null;
+    this.SUMMARY_BROADCAST_INTERVAL_MS = 3000; // 3 seconds
+    this.lastSummary = null;
   }
 
   /**
    * Initialize with socket.io instance
+   * Starts periodic summary broadcasts
    */
   init(io) {
     this.io = io;
+    this.startSummaryBroadcasts();
+  }
+
+  /**
+   * Start periodic lightweight summary broadcasts
+   * Emits aggregated alert data every 3 seconds to all connected clients
+   */
+  startSummaryBroadcasts() {
+    // Clear any existing interval
+    if (this.summaryInterval) {
+      clearInterval(this.summaryInterval);
+    }
+
+    this.summaryInterval = setInterval(async () => {
+      await this.broadcastAlertSummary();
+    }, this.SUMMARY_BROADCAST_INTERVAL_MS);
+
+    console.log('[WebSocket] Alert summary broadcasts started (every 3s)');
+  }
+
+  /**
+   * Stop periodic summary broadcasts
+   */
+  stopSummaryBroadcasts() {
+    if (this.summaryInterval) {
+      clearInterval(this.summaryInterval);
+      this.summaryInterval = null;
+      console.log('[WebSocket] Alert summary broadcasts stopped');
+    }
+  }
+
+  /**
+   * Broadcast lightweight alert summary to all connected clients
+   */
+  async broadcastAlertSummary() {
+    if (!this.io) return;
+
+    try {
+      const summary = await alertApiService.getAlertSummary();
+      
+      // Only broadcast if summary has changed
+      if (JSON.stringify(summary) !== JSON.stringify(this.lastSummary)) {
+        this.lastSummary = summary;
+        
+        const payload = {
+          event: 'alert_summary',
+          data: summary,
+          timestamp: Date.now()
+        };
+
+        // Broadcast to all connected clients
+        this.io.emit('alert_summary', payload);
+      }
+    } catch (error) {
+      console.error('[WebSocket] Error broadcasting alert summary:', error.message);
+    }
   }
 
   /**

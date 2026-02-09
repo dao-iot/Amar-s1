@@ -41,3 +41,11 @@ CREATE TABLE IF NOT EXISTS alerts (
 CREATE INDEX IF NOT EXISTS idx_alerts_vehicle ON alerts(vehicle_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity);
 CREATE INDEX IF NOT EXISTS idx_alerts_unresolved ON alerts(resolved_at) WHERE resolved_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_alerts_created_at ON alerts(created_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_vehicle_resolved ON alerts(vehicle_id, resolved_at) WHERE resolved_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(alert_type);
+
+-- Composite indexes for aggregation queries
+CREATE INDEX IF NOT EXISTS idx_alerts_resolved_severity ON alerts(resolved_at, severity) WHERE resolved_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_alerts_resolved_vehicle ON alerts(resolved_at, vehicle_id) WHERE resolved_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_alerts_resolved_created ON alerts(resolved_at, created_at) WHERE resolved_at IS NULL;

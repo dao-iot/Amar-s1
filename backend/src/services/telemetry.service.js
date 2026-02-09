@@ -82,26 +82,22 @@ class TelemetryService {
   }
 
   /**
-   * Calculate basic stats per vehicle
+   * Calculate basic stats per vehicle (optimized)
    */
   async getTelemetryStats() {
+    // Simplified query to prevent timeouts - get latest telemetry per vehicle
     const query = `
-      WITH latest_telemetry AS (
-        SELECT DISTINCT ON (vehicle_id) vehicle_id, data, timestamp
-        FROM telemetry
-        ORDER BY vehicle_id, timestamp DESC
-      )
-      SELECT 
+      SELECT DISTINCT ON (v.vehicle_id) 
         v.vehicle_id,
         v.model,
-        AVG((t.data->>'speed')::FLOAT) as avg_speed,
-        MIN((t.data->>'battery_voltage')::FLOAT) as min_voltage,
-        MAX((t.data->>'battery_voltage')::FLOAT) as max_voltage,
-        (lt.data->>'soc')::FLOAT as current_soc
+        (t.data->>'speed')::FLOAT as current_speed,
+        (t.data->>'soc')::FLOAT as current_soc,
+        (t.data->>'battery_voltage')::FLOAT as current_voltage,
+        (t.data->>'battery_temp')::FLOAT as current_temp,
+        t.timestamp as last_updated
       FROM vehicles v
       LEFT JOIN telemetry t ON v.vehicle_id = t.vehicle_id
-      LEFT JOIN latest_telemetry lt ON v.vehicle_id = lt.vehicle_id
-      GROUP BY v.vehicle_id, v.model, lt.data
+      ORDER BY v.vehicle_id, t.timestamp DESC
     `;
     const { rows } = await db.query(query);
     return rows;

@@ -1,5 +1,6 @@
 const db = require('../db');
 const broadcaster = require('../websocket/broadcaster');
+const alertStateManager = require('../services/alert.state.manager');
 
 /**
  * Service to handle alert-related database operations and real-time triggers
@@ -124,12 +125,23 @@ class AlertService {
     const { rows } = await db.query(query, values);
     const alert = rows[0];
 
+    // Process through state manager for human factors compliance
+    const stateResult = alertStateManager.processAlert({
+      vehicle_id: vehicleId,
+      alert_type: rule.type,
+      severity: rule.severity,
+      message: rule.message(data)
+    });
+
     // Add to cache for fast deduplication
     this.setCachedAlert(vehicleId, rule.type, alert.alert_id);
     this.stats.alertsCreated++;
 
-    // Broadcast via WebSocket bypass throttling
-    this.broadcastAlert(alert);
+    // Broadcast via WebSocket - only if state manager says to notify
+    if (stateResult.shouldNotify) {
+      this.broadcastAlert(alert, stateResult.visualImpact);
+    }
+    
     return alert;
   }
 
@@ -186,20 +198,21 @@ class AlertService {
   }
 
   /**
-   * Broadcast alert via Socket.io
+   * Broadcast alert via Socket.io with visual impact metadata
    */
-  broadcastAlert(alert) {
+  broadcastAlert(alert, visualImpact = null) {
     // broadcaster is already initialized with io in Day 3
     if (broadcaster.io) {
       const payload = {
-        event: 'new_alert',
+        event: 'alert_state_update',
         alert: {
           alert_id: alert.alert_id,
           vehicle_id: alert.vehicle_id,
           severity: alert.severity,
           message: alert.message,
           created_at: alert.created_at
-        }
+        },
+        visualImpact // Include human factors metadata
       };
       
       // Broadcast to all clients (or just those subscribed to the vehicle)
@@ -208,7 +221,7 @@ class AlertService {
       const subscribers = subscriptionManager.getSubscribers(alert.vehicle_id);
       
       subscribers.forEach(socketId => {
-        broadcaster.io.to(socketId).emit('new_alert', payload);
+        broadcaster.io.to(socketId).emit('alert_state_update', payload);
       });
     }
   }
