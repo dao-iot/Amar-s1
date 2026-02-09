@@ -1,0 +1,28 @@
+{
+  "name": "ev-fleet-backend",
+  "version": "1.0.0",
+  "description": "Real-time EV Data Platform Backend",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "cors": "^2.8.6",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "framer-motion": "^12.31.0",
+    "jsonwebtoken": "^9.0.3",
+    "lucide-react": "^0.563.0",
+    "pg": "^8.13.1",
+    "socket.io": "^4.8.3",
+    "tailwind-merge": "^3.4.0"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.24",
+    "nodemon": "^3.1.9",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.18"
+  }
+}
